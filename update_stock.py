@@ -1,62 +1,80 @@
 import os
 import sys
-from notion_client import Client
+import time
+import random
+import requests
 import yfinance as yf
 
-# 1. 初始化 Notion Client
-notion_token = os.environ.get("NOTION_TOKEN")
-database_id = os.environ.get("DATABASE_ID")
+# 1. 讀取環境變數
+NOTION_TOKEN = os.environ.get("NOTION_TOKEN")
+DATABASE_ID = os.environ.get("DATABASE_ID")
 
-if not notion_token or not database_id:
+if not NOTION_TOKEN or not DATABASE_ID:
     print("錯誤：找不到 NOTION_TOKEN 或 DATABASE_ID 環境變數。")
     sys.exit(1)
 
-notion = Client(auth=notion_token)
+# 2. 設定 Notion 官方標準 API 標頭
+HEADERS = {
+    "Authorization": f"Bearer {NOTION_TOKEN}",
+    "Content-Type": "application/json",
+    "Notion-Version": "2022-06-28"
+}
 
 def get_notion_stocks():
-    """從 Notion Database 取得所有股票資料"""
+    """從台股 Notion Database 取得所有股票資料"""
     stocks = []
     has_more = True
     start_cursor = None
+    url = f"https://api.notion.com/v1/databases/{DATABASE_ID}/query"
     
     while has_more:
-        kwargs = {"database_id": database_id}
+        body = {}
         if start_cursor:
-            kwargs["start_cursor"] = start_cursor
+            body["start_cursor"] = start_cursor
             
-        response = notion.databases.query(**kwargs)
+        try:
+            response = requests.post(url, headers=HEADERS, json=body, timeout=15)
+            if response.status_code != 200:
+                print(f"Notion API 回傳錯誤 ({response.status_code}): {response.text}")
+                break
+            data = response.json()
+        except Exception as e:
+            print(f"發送 Notion 請求時發生網路錯誤: {e}")
+            break
         
-        for row in response.get("results", []):
+        for row in data.get("results", []):
             page_id = row["id"]
             properties = row.get("properties", {})
             
-            # 取得 Ticker 欄位
-            ticker_data = properties.get("Ticker", {})
-            ticker_type = ticker_data.get("type")
-            
+            # 同時支援名為 'Ticker' 或 'Name' 的欄位
             ticker = ""
-            # 同時支援 Rich Text (文字屬性) 與 Title (標題屬性)
-            if ticker_type == "rich_text" and ticker_data.get("rich_text"):
-                ticker = "".join([t["plain_text"] for t in ticker_data["rich_text"]]).strip()
-            elif ticker_type == "title" and ticker_data.get("title"):
-                ticker = "".join([t["plain_text"] for t in ticker_data["title"]]).strip()
+            for field_name in ["Ticker", "Name"]:
+                ticker_data = properties.get(field_name, {})
+                ticker_type = ticker_data.get("type")
+                
+                if ticker_type == "rich_text" and ticker_data.get("rich_text"):
+                    ticker = "".join([t["plain_text"] for t in ticker_data["rich_text"]]).strip()
+                    break
+                elif ticker_type == "title" and ticker_data.get("title"):
+                    ticker = "".join([t["plain_text"] for t in ticker_data["title"]]).strip()
+                    break
                 
             if ticker:
                 stocks.append({"page_id": page_id, "ticker": ticker})
                 
-        has_more = response.get("has_more", False)
-        start_cursor = response.get("next_cursor")
+        has_more = data.get("has_more", False)
+        start_cursor = data.get("next_cursor")
         
     return stocks
 
 def get_single_stock_price(ticker):
-    """改用 yf.Ticker 個別抓取最新股價，避開 download() 的環境衝突問題"""
+    """【防封鎖精準版】單獨抓取台股最新股價"""
     try:
         t = yf.Ticker(ticker)
-        # 嘗試從 fast_info 取得最新價格
+        # 優先嘗試快速獲取最新價格
         price = t.fast_info.get('last_price')
         
-        # 如果 fast_info 拿不到，改從 history 拿最後一筆收盤價
+        # 如果快速獲取失敗，改用歷史紀錄拿最後一筆
         if price is None:
             hist = t.history(period="1d")
             if not hist.empty:
@@ -70,32 +88,35 @@ def get_single_stock_price(ticker):
 
 def update_notion_price(page_id, price):
     """更新 Notion 的 Current price 欄位"""
-    try:
-        notion.pages.update(
-            page_id=page_id,
-            properties={
-                "Current price": {
-                    "number": price
-                }
+    url = f"https://api.notion.com/v1/pages/{page_id}"
+    body = {
+        "properties": {
+            "Current price": {
+                "number": price
             }
-        )
-        return True
+        }
+    }
+    try:
+        response = requests.patch(url, headers=HEADERS, json=body, timeout=15)
+        if response.status_code == 200:
+            return True
+        else:
+            print(f"更新台股頁面失敗 ({response.status_code}): {response.text}")
+            return False
     except Exception as e:
-        print(f"更新 Notion 失敗 (Page ID: {page_id}): {e}")
+        print(f"網路連線發送更新失敗 (Page ID: {page_id}): {e}")
         return False
 
 def main():
-    print("開始執行 Notion 股價更新排程...")
+    print("開始執行【台股】Notion 股價更新排程...")
     
-    # 步驟 1: 抓取 Notion 資料
     stocks = get_notion_stocks()
     if not stocks:
-        print("Notion Database 中沒有找到任何 Ticker，請確認欄位名稱是否為 'Ticker' 且有資料。")
+        print("台股 Database 中沒有找到任何股票代號，或者讀取失敗。")
         return
         
-    print(f"成功從 Notion 讀取到 {len(stocks)} 筆股票資料。")
+    print(f"成功從 Notion 讀取到 {len(stocks)} 筆台股資料。")
     
-    # 步驟 2 & 步驟 3: 逐一查詢並更新到 Notion
     success_count = 0
     for stock in stocks:
         ticker = stock["ticker"]
@@ -106,12 +127,15 @@ def main():
         
         if price is not None:
             if update_notion_price(page_id, price):
-                print(f"成功更新 {ticker}: ${price}")
+                print(f"成功更新 {ticker}: {price}")
                 success_count += 1
         else:
-            print(f"跳過 {ticker}：未能取得有效股價。")
+            print(f"跳過 {ticker}：未能取得有效股價（可能正被 Yahoo 暫時限流）。")
             
-    print(f"執行完畢！成功更新 {success_count} / {len(stocks)} 筆資料。")
+        # 關鍵防封鎖：每查完一檔股票，隨機休息 2 ~ 4 秒，假裝是真人在看網頁
+        time.sleep(random.uniform(2.0, 4.0))
+            
+    print(f"執行完畢！台股成功更新 {success_count} / {len(stocks)} 筆資料。")
 
 if __name__ == "__main__":
     main()
