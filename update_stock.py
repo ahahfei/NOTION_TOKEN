@@ -1,5 +1,6 @@
 import os
 import sys
+import math
 from notion_client import Client
 import yfinance as yf
 
@@ -30,15 +31,16 @@ def get_notion_stocks():
             page_id = row["id"]
             properties = row.get("properties", {})
             
-            # 取得 Ticker 欄位 (支援 Title 或 Rich Text 類型)
+            # 取得 Ticker 欄位
             ticker_data = properties.get("Ticker", {})
             ticker_type = ticker_data.get("type")
             
             ticker = ""
-            if ticker_type == "title" and ticker_data.get("title"):
-                ticker = "".join([t["plain_text"] for t in ticker_data["title"]]).strip()
-            elif ticker_type == "rich_text" and ticker_data.get("rich_text"):
+            # 同時支援 Rich Text (文字屬性) 與 Title (標題屬性)
+            if ticker_type == "rich_text" and ticker_data.get("rich_text"):
                 ticker = "".join([t["plain_text"] for t in ticker_data["rich_text"]]).strip()
+            elif ticker_type == "title" and ticker_data.get("title"):
+                ticker = "".join([t["plain_text"] for t in ticker_data["title"]]).strip()
                 
             if ticker:
                 stocks.append({"page_id": page_id, "ticker": ticker})
@@ -67,7 +69,7 @@ def get_stock_prices(tickers):
                 else:
                     price = data[ticker]['Close'].iloc[-1]
                 
-                if not sys.math.isnan(price):
+                if not math.isnan(price):
                     prices[ticker] = round(float(price), 2)
             except Exception as e:
                 print(f"無法解析 {ticker} 的股價: {e}")
