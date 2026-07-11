@@ -4,7 +4,7 @@ import math
 from notion_client import Client
 import yfinance as yf
 
-# 修正：強制關閉 yfinance 的快取功能，避免 sqlite database is locked 錯誤
+# 強制關閉 yfinance 的快取功能，避免 sqlite database is locked 錯誤
 yf.set_tz_cache_location(None)
 
 # 1. 初始化 Notion Client
@@ -61,8 +61,8 @@ def get_stock_prices(tickers):
     print(f"正在從 Yahoo Finance 查詢股價: {tickers}")
     prices = {}
     try:
-        # 加上 nans_to_nulls=False 確保新版 yfinance 下載穩定
-        data = yf.download(tickers, period="1d", group_by="ticker", progress=False, nans_to_nulls=False)
+        # 修正：拿掉不支援的 nans_to_nulls 參數
+        data = yf.download(tickers, period="1d", group_by="ticker", progress=False)
         
         for ticker in tickers:
             try:
@@ -71,7 +71,8 @@ def get_stock_prices(tickers):
                 else:
                     price = data[ticker]['Close'].iloc[-1]
                 
-                if not math.isnan(price):
+                # 安全檢查：確保價格不是 NaN 且大於 0
+                if price is not None and not math.isnan(price) and price > 0:
                     prices[ticker] = round(float(price), 2)
             except Exception as e:
                 print(f"無法解析 {ticker} 的股價: {e}")
