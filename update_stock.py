@@ -1,11 +1,7 @@
 import os
 import sys
-import math
 from notion_client import Client
 import yfinance as yf
-
-# 強制關閉 yfinance 的快取功能，避免 sqlite database is locked 錯誤
-yf.set_tz_cache_location(None)
 
 # 1. 初始化 Notion Client
 notion_token = os.environ.get("NOTION_TOKEN")
@@ -53,33 +49,24 @@ def get_notion_stocks():
         
     return stocks
 
-def get_stock_prices(tickers):
-    """使用 yfinance 批次查詢最新股價"""
-    if not tickers:
-        return {}
-    
-    print(f"正在從 Yahoo Finance 查詢股價: {tickers}")
-    prices = {}
+def get_single_stock_price(ticker):
+    """改用 yf.Ticker 個別抓取最新股價，避開 download() 的環境衝突問題"""
     try:
-        # 修正：拿掉不支援的 nans_to_nulls 參數
-        data = yf.download(tickers, period="1d", group_by="ticker", progress=False)
+        t = yf.Ticker(ticker)
+        # 嘗試從 fast_info 取得最新價格
+        price = t.fast_info.get('last_price')
         
-        for ticker in tickers:
-            try:
-                if len(tickers) == 1:
-                    price = data['Close'].iloc[-1]
-                else:
-                    price = data[ticker]['Close'].iloc[-1]
+        # 如果 fast_info 拿不到，改從 history 拿最後一筆收盤價
+        if price is None:
+            hist = t.history(period="1d")
+            if not hist.empty:
+                price = hist['Close'].iloc[-1]
                 
-                # 安全檢查：確保價格不是 NaN 且大於 0
-                if price is not None and not math.isnan(price) and price > 0:
-                    prices[ticker] = round(float(price), 2)
-            except Exception as e:
-                print(f"無法解析 {ticker} 的股價: {e}")
+        if price is not None and price > 0:
+            return round(float(price), 2)
     except Exception as e:
-        print(f"Yahoo Finance 下載失敗: {e}")
-        
-    return prices
+        print(f"查詢 {ticker} 股價時發生錯誤: {e}")
+    return None
 
 def update_notion_price(page_id, price):
     """更新 Notion 的 Current price 欄位"""
@@ -108,18 +95,16 @@ def main():
         
     print(f"成功從 Notion 讀取到 {len(stocks)} 筆股票資料。")
     
-    # 步驟 2: 整理所有的 Ticker 並查詢股價
-    ticker_list = list(set([s["ticker"] for s in stocks]))
-    prices = get_stock_prices(ticker_list)
-    
-    # 步驟 3: 回填股價到 Notion
+    # 步驟 2 & 步驟 3: 逐一查詢並更新到 Notion
     success_count = 0
     for stock in stocks:
         ticker = stock["ticker"]
         page_id = stock["page_id"]
         
-        if ticker in prices:
-            price = prices[ticker]
+        print(f"正在查詢 {ticker} 的最新股價...")
+        price = get_single_stock_price(ticker)
+        
+        if price is not None:
             if update_notion_price(page_id, price):
                 print(f"成功更新 {ticker}: ${price}")
                 success_count += 1
