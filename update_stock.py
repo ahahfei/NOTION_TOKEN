@@ -5,22 +5,25 @@ import yfinance as yf
 
 # 1. 初始化 Notion Client
 notion_token = os.environ.get("NOTION_TOKEN")
-database_id = os.environ.get("DATABASE_ID")
+database_id_tw = os.environ.get("DATABASE_ID")      # 原本的台股 ID
+database_id_us = os.environ.get("DATABASE_ID_US")   # 新增的美股 ID
 
-if not notion_token or not database_id:
-    print("錯誤：找不到 NOTION_TOKEN 或 DATABASE_ID 環境變數。")
+if not notion_token:
+    print("錯誤：找不到 NOTION_TOKEN 環境變數。")
     sys.exit(1)
 
 notion = Client(auth=notion_token)
 
-def get_notion_stocks():
-    """從 Notion Database 取得所有股票資料"""
+def get_notion_stocks(db_id):
+    """從指定的 Notion Database 取得所有股票資料"""
+    if not db_id:
+        return []
     stocks = []
     has_more = True
     start_cursor = None
     
     while has_more:
-        kwargs = {"database_id": database_id}
+        kwargs = {"database_id": db_id}
         if start_cursor:
             kwargs["start_cursor"] = start_cursor
             
@@ -30,16 +33,18 @@ def get_notion_stocks():
             page_id = row["id"]
             properties = row.get("properties", {})
             
-            # 取得 Ticker 欄位
-            ticker_data = properties.get("Ticker", {})
-            ticker_type = ticker_data.get("type")
-            
+            # 同時支援名為 'Ticker' 或 'Name' 的欄位 (支援 Rich Text 或 Title)
             ticker = ""
-            # 同時支援 Rich Text (文字屬性) 與 Title (標題屬性)
-            if ticker_type == "rich_text" and ticker_data.get("rich_text"):
-                ticker = "".join([t["plain_text"] for t in ticker_data["rich_text"]]).strip()
-            elif ticker_type == "title" and ticker_data.get("title"):
-                ticker = "".join([t["plain_text"] for t in ticker_data["title"]]).strip()
+            for field_name in ["Ticker", "Name"]:
+                ticker_data = properties.get(field_name, {})
+                ticker_type = ticker_data.get("type")
+                
+                if ticker_type == "rich_text" and ticker_data.get("rich_text"):
+                    ticker = "".join([t["plain_text"] for t in ticker_data["rich_text"]]).strip()
+                    break
+                elif ticker_type == "title" and ticker_data.get("title"):
+                    ticker = "".join([t["plain_text"] for t in ticker_data["title"]]).strip()
+                    break
                 
             if ticker:
                 stocks.append({"page_id": page_id, "ticker": ticker})
@@ -50,13 +55,11 @@ def get_notion_stocks():
     return stocks
 
 def get_single_stock_price(ticker):
-    """改用 yf.Ticker 個別抓取最新股價，避開 download() 的環境衝突問題"""
+    """個別抓取最新股價"""
     try:
         t = yf.Ticker(ticker)
-        # 嘗試從 fast_info 取得最新價格
         price = t.fast_info.get('last_price')
         
-        # 如果 fast_info 拿不到，改從 history 拿最後一筆收盤價
         if price is None:
             hist = t.history(period="1d")
             if not hist.empty:
@@ -84,18 +87,15 @@ def update_notion_price(page_id, price):
         print(f"更新 Notion 失敗 (Page ID: {page_id}): {e}")
         return False
 
-def main():
-    print("開始執行 Notion 股價更新排程...")
-    
-    # 步驟 1: 抓取 Notion 資料
-    stocks = get_notion_stocks()
+def process_database(db_id, db_name):
+    print(f"\n--- 開始處理 {db_name} 資料庫 ---")
+    stocks = get_notion_stocks(db_id)
     if not stocks:
-        print("Notion Database 中沒有找到任何 Ticker，請確認欄位名稱是否為 'Ticker' 且有資料。")
+        print(f"{db_name} 中沒有找到任何股票代號。")
         return
         
-    print(f"成功從 Notion 讀取到 {len(stocks)} 筆股票資料。")
+    print(f"成功從 {db_name} 讀取到 {len(stocks)} 筆股票資料。")
     
-    # 步驟 2 & 步驟 3: 逐一查詢並更新到 Notion
     success_count = 0
     for stock in stocks:
         ticker = stock["ticker"]
@@ -111,7 +111,18 @@ def main():
         else:
             print(f"跳過 {ticker}：未能取得有效股價。")
             
-    print(f"執行完畢！成功更新 {success_count} / {len(stocks)} 筆資料。")
+    print(f"{db_name} 執行完畢！成功更新 {success_count} / {len(stocks)} 筆資料。")
+
+def main():
+    print("開始執行 Notion 股價全面更新排程...")
+    
+    # 處理台股
+    if database_id_tw:
+        process_database(database_id_tw, "台股")
+        
+    # 處理美股
+    if database_id_us:
+        process_database(database_id_us, "美股")
 
 if __name__ == "__main__":
     main()
